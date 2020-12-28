@@ -35,13 +35,20 @@ function main()
 			tcp_port = Number(argv[++i]);
 	}
 
-	// Remove hostname if it is really missing
-	var smtp_hostname = client.host_name;
-	if (smtp_hostname == "<no name>") {
-		smtp_hostname = undefined;
+	var hdrs = {
+		File: message_text_filename,
+		From: reverse_path,
+		Helo: hello_name,
+		IP: client.ip_address,
+		Rcpt: recipient_address,
+	};
+
+	// Omit hostname if it is really missing
+	if (client.host_name != "<no name>") {
+		hdrs["Hostname"] = client.host_name
 	}
 
-	var smtp_recipients = undefined;
+	// Try collect full recipient list
 	var ini = new File(recipient_list_filename);
 	if (ini.open("r")) {
 		objs = ini.iniGetAllObjects();
@@ -50,19 +57,11 @@ function main()
 		for (var i = 0; i < objs.length; i++) {
 			addr_list.push(objs[i]["To"]);
 		}
-		smtp_recipients = addr_list.join(",");
+		hdrs["Rcpt"] = addr_list.join(",");
 	} else {
 		log(LOG_ERROR, "couldn't open SMTP recipient file");
-		smtp_recipients = recipient_address;
 	}
-	var hdrs = {
-		File: message_text_filename,
-		From: reverse_path,
-		Helo: hello_name,
-		Hostname: smtp_hostname,
-		IP: client.ip_address,
-		Rcpt: smtp_recipients,
-	};
+
 	var http_request = new HTTPRequest(undefined, undefined, hdrs);
 	var raw_result = http_request.Get("http://" + address + ":" + tcp_port + "/checkv2");
 
