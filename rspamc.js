@@ -6,13 +6,15 @@
 // ---------------------------------------------------------------------------
 // Example mailproc.ini entries:
 
-// [Command=rspamc.js]
-// [Command=rspamc.js -d 127.0.0.1 -p 11333]
+// [Rspamd]
+// Command=rspamc.js --filescan
+// Command=rspamc.js -d 127.0.0.1 -p 11333
 // ---------------------------------------------------------------------------
 
 // Options:
 // dest <rspamd_ip_address>
 // port <rspamd_tcp_port>
+// filescan
 
 require("http.js", 'HTTPRequest');
 
@@ -58,7 +60,8 @@ function main()
 		// Or read message body...
 		var message_file = new File(message_text_filename);
 		if (!message_file.open("rb")) {
-			log(LOG_ERROR, "couldn't read message: " + message_file.error);
+			log(LOG_ERROR, format("!ERROR %d opening message file: %s",
+				message_file.error, message_text_filename));
 			return;
 		}
 		message_body = message_file.read()
@@ -75,7 +78,8 @@ function main()
 		}
 		hdrs["Rcpt"] = addr_list.join(",");
 	} else {
-		log(LOG_ERROR, "couldn't open SMTP recipient file: " + ini.error);
+		log(LOG_ERROR, format("!ERROR %d opening recipients file: %s",
+			ini.error, recipients_list_filename));
 	}
 
 	var http_request = new HTTPRequest(undefined, undefined, hdrs);
@@ -85,7 +89,8 @@ function main()
 	if (use_file_scan) {
 		raw_result = http_request.Get(rspamd_url);
 	} else {
-		raw_result = http_request.Post(rspamd_url, message_body, undefined, undefined, "application/octet-stream");
+		raw_result = http_request.Post(rspamd_url, message_body,
+			undefined, undefined, "application/octet-stream");
 	}
 
 	if (http_request.response_code !== 200) {
