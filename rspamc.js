@@ -18,9 +18,50 @@
 
 require("http.js", 'HTTPRequest');
 
-function rewrite_message(add_hdr, rem_hdr, dkim_signature, rewrite_subject)
+function smtp_error(smtp_message)
 {
-	log(LOG_INFO, "not ACTUALLY rewriting message");
+	var error_file = new File(processing_error_filename);
+	if (!error_file.open("w")) {
+		log(LOG_ERR,format("!ERROR %d opening processing error file: %s"
+			,error_file.error, processing_error_filename));
+		return;
+	}
+	error_file.writeln(smtp_message);
+	error_file.close();
+}
+
+function handle_result(result)
+{
+	if (result.error) {
+		log(LOG_ERR, "error from rspamd: " + result.error);
+		return;
+	}
+
+	if (result.action == "no action") {
+		log(LOG_INFO, "message declared to be clean");
+	} else if (result.action == "reject") {
+		log(LOG_INFO, "rejecting SPAM with SMTP error");
+		var reject_message = (result.messages || {}).smtp_message || "Rejected as spam";
+		smtp_error(reject_message);
+		system.spamlog("SMTP","REJECTED"
+			,"Rspamd suggested reject"
+			,client.host_name, client.ip_address
+			,recipient_address
+			,reverse_path);
+	} else if (result.action == "soft reject") {
+		log(LOG_INFO, "deferring mail with SMTP error");
+		var reject_message = "450 " + (result.messages || {}).smtp_message || "Try again later";
+		smtp_error(reject_message);
+		system.spamlog("SMTP","DEFERRED"
+			,"Rspamd suggested soft reject"
+			,client.host_name, client.ip_address
+			,recipient_address
+			,reverse_path);
+	} else if (result.action == "add header") {
+		// Rewrite message with added header
+	} else {
+		log(LOG_WARNING, format("unimplemented action: %s", result.action));
+	}
 }
 
 function rspamd_scan(address, tcp_port, use_file_scan)
@@ -44,21 +85,6 @@ function rspamd_scan(address, tcp_port, use_file_scan)
 		hdrs["User"] = "" + client.user_number;
 	}
 
-	var message_body = undefined;
-	if (use_file_scan) {
-		// Set File header
-		hdrs["File"] = message_text_filename;
-	} else {
-		// Or read message body...
-		var message_file = new File(message_text_filename);
-		if (!message_file.open("rb")) {
-			log(LOG_ERROR, format("!ERROR %d opening message file: %s",
-				message_file.error, message_text_filename));
-			return;
-		}
-		message_body = message_file.read()
-	}
-
 	// Try collect full recipient list
 	var ini = new File(recipient_list_filename);
 	if (ini.open("r")) {
@@ -79,81 +105,31 @@ function rspamd_scan(address, tcp_port, use_file_scan)
 	var rspamd_url = "http://" + address + ":" + tcp_port + "/checkv2";
 	var raw_result = undefined;
 
+	// Perform scan by sending reference to file...
 	if (use_file_scan) {
+		hdrs["File"] = message_text_filename;
 		raw_result = http_request.Get(rspamd_url);
+	// ... Or by transmitting file contents
 	} else {
-		raw_result = http_request.Post(rspamd_url, message_body,
+		var message_file = new File(message_text_filename);
+		if (!message_file.open("rb")) {
+			log(LOG_ERROR, format("!ERROR %d opening message file: %s",
+				message_file.error, message_text_filename));
+			return;
+		}
+		raw_result = http_request.Post(rspamd_url, message_file.read(),
 			undefined, undefined, "application/octet-stream");
 	}
 
 	if (http_request.response_code !== 200) {
-		log(LOG_ERROR, "bad response code from rspamd: " + http_request.response_code);
+		log(LOG_ERROR, format("!ERROR bad response code from rspamd: %d",
+			http_request.response_code));
 	}
 
 	// XXX: try catch?
 	var presult = JSON.parse(raw_result);
 
-	if (presult.error) {
-		log(LOG_ERR, "error from rspamd: " + presult.error);
-		return;
-	}
-
-	var add_hdr = {};
-	var rem_hdr = {};
-	var rewrite_subject = undefined;
-	var dkim_signature = undefined;
-
-	if (presult.action == "no action") {
-		log(LOG_INFO, "message declared to be clean");
-	} else if (presult.action == "reject") {
-		log(LOG_INFO, "rejecting SPAM with SMTP error");
-		var error_file = new File(processing_error_filename);
-		if (!error_file.open("w")) {
-			log(LOG_ERR,format("!ERROR %d opening processing error file: %s"
-				,error_file.error, processing_error_filename));
-			return;
-		}
-		var reject_message = (presult.messages || {}).smtp_message || "Rejected as spam";
-		error_file.writeln(reject_message);
-		error_file.close();
-		system.spamlog("SMTP","REJECTED"
-			,"Rspamd " + Object.keys(presult.symbols).join(",")
-			,client.host_name, client.ip_address
-			,recipient_address
-			,reverse_path);
-		return;
-	} else if (presult.action == "soft reject") {
-		log(LOG_INFO, "deferring mail with SMTP error");
-		// XXX: copypasta
-		var error_file = new File(processing_error_filename);
-		if (!error_file.open("w")) {
-			log(LOG_ERR,format("!ERROR %d opening processing error file: %s"
-				,error_file.error, processing_error_filename));
-			return;
-		}
-		var reject_message = (presult.messages || {}).smtp_message || "450 Try again later";
-		error_file.writeln(reject_message);
-		error_file.close();
-		return;
-	} else if (presult.action == "add header") {
-		// Set spam flag
-		add_hdr["X-Spam-Flag"] = "Yes";
-		rem_hdr["X-Spam-Flag"] = 0;
-	} else if (presult.action == "rewrite subject") {
-		// Set spam flag
-		add_hdr["X-Spam-Flag"] = "Yes";
-		rem_hdr["X-Spam-Flag"] = 0;
-		// Remember to rewrite subject later
-		rewrite_subject = presult.subject;
-	}
-
-	// Collect DKIM signature if set
-	dkim_signature = presult["dkim-signature"];
-
-	// Rewrite message if something calls for it
-	if (Object.keys(add_hdr).length > 0 || Object.keys(rem_hdr).length > 0 || dkim_signature || rewrite_subject) {
-		rewrite_message(add_hdr, rem_hdr, dkim_signature, rewrite_subject);
-	}
+	return presult
 }
 
 function main()
@@ -178,7 +154,10 @@ function main()
 			tcp_port = Number(argv[++i]);
 	}
 
-	rspamd_scan(address, tcp_port, use_file_scan);
+	// Call Rspamd
+	var result = rspamd_scan(address, tcp_port, use_file_scan);
+	// Do something with scan results
+	handle_result(result);
 }
 
 main();
