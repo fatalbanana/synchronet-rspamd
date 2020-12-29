@@ -52,6 +52,11 @@ function main()
 		hdrs["Hostname"] = client.host_name;
 	}
 
+	// Add user number if available
+	if (client.user_number != 0) {
+		hdrs["User"] = "" + client.user_number;
+	}
+
 	var message_body = undefined;
 	if (use_file_scan) {
 		// Set File header
@@ -140,7 +145,7 @@ function main()
 	// XXX: add header
 	// XXX: rewrite subject
 	// XXX: add/remove headers
-	// XXX: authenticated users; DKIM
+	// XXX: DKIM
 }
 
 main();
