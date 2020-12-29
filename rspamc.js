@@ -18,32 +18,19 @@
 
 require("http.js", 'HTTPRequest');
 
-function main()
+function rewrite_message(add_hdr, rem_hdr, dkim_signature, rewrite_subject)
 {
-	var address = '127.0.0.1';
-	var tcp_port = 11333;
-	var use_file_scan = false;
+	log(LOG_INFO, "not ACTUALLY rewriting message");
+}
 
-	// Process arguments:
-	for(i=0; i<argc; i++) {
-
-		// Strip any pre-pended slashes
-		while(argv[i].charAt(0)=='-')
-			argv[i]=argv[i].slice(1);
-
-		// Standard rspamc options:
-		if (argv[i]=='d' || argv[i]=='dest')
-			address = argv[++i];
-		else if (argv[i]=='f' || argv[i]=='filescan')
-			use_file_scan = true;
-		else if (argv[i]=='p' || argv[i]=='port')
-			tcp_port = Number(argv[++i]);
-	}
-
+function rspamd_scan(address, tcp_port, use_file_scan)
+{
+	// Set headers to be sent to Rspamd
 	var hdrs = {
 		From: reverse_path,
 		Helo: hello_name,
 		IP: client.ip_address,
+		// To be overwritten with full recipient list
 		Rcpt: recipient_address,
 	};
 
@@ -76,12 +63,13 @@ function main()
 	var ini = new File(recipient_list_filename);
 	if (ini.open("r")) {
 		objs = ini.iniGetAllObjects();
-		// XXX: if file is poorly formed?
 		var addr_list = [];
 		for (var i = 0; i < objs.length; i++) {
 			addr_list.push(objs[i]["To"]);
 		}
-		hdrs["Rcpt"] = addr_list.join(",");
+		if (addr_list.length != 0) {
+			hdrs["Rcpt"] = addr_list.join(",");
+		}
 	} else {
 		log(LOG_ERROR, format("!ERROR %d opening recipients file: %s",
 			ini.error, recipients_list_filename));
@@ -110,7 +98,14 @@ function main()
 		return;
 	}
 
-	if (presult.action == "reject") {
+	var add_hdr = {};
+	var rem_hdr = {};
+	var rewrite_subject = undefined;
+	var dkim_signature = undefined;
+
+	if (presult.action == "no action") {
+		log(LOG_INFO, "message declared to be clean");
+	} else if (presult.action == "reject") {
 		log(LOG_INFO, "rejecting SPAM with SMTP error");
 		var error_file = new File(processing_error_filename);
 		if (!error_file.open("w")) {
@@ -128,7 +123,7 @@ function main()
 			,reverse_path);
 		return;
 	} else if (presult.action == "soft reject") {
-		log(LOG_INFO, "defering mail with SMTP error");
+		log(LOG_INFO, "deferring mail with SMTP error");
 		// XXX: copypasta
 		var error_file = new File(processing_error_filename);
 		if (!error_file.open("w")) {
@@ -139,13 +134,51 @@ function main()
 		var reject_message = (presult.messages || {}).smtp_message || "450 Try again later";
 		error_file.writeln(reject_message);
 		error_file.close();
-		// XXX: logging?
 		return;
+	} else if (presult.action == "add header") {
+		// Set spam flag
+		add_hdr["X-Spam-Flag"] = "Yes";
+		rem_hdr["X-Spam-Flag"] = 0;
+	} else if (presult.action == "rewrite subject") {
+		// Set spam flag
+		add_hdr["X-Spam-Flag"] = "Yes";
+		rem_hdr["X-Spam-Flag"] = 0;
+		// Remember to rewrite subject later
+		rewrite_subject = presult.subject;
 	}
-	// XXX: add header
-	// XXX: rewrite subject
-	// XXX: add/remove headers
-	// XXX: DKIM
+
+	// Collect DKIM signature if set
+	dkim_signature = presult["dkim-signature"];
+
+	// Rewrite message if something calls for it
+	if (Object.keys(add_hdr).length > 0 || Object.keys(rem_hdr).length > 0 || dkim_signature || rewrite_subject) {
+		rewrite_message(add_hdr, rem_hdr, dkim_signature, rewrite_subject);
+	}
+}
+
+function main()
+{
+	var address = '127.0.0.1';
+	var tcp_port = 11333;
+	var use_file_scan = false;
+
+	// Process arguments:
+	for(i=0; i<argc; i++) {
+
+		// Strip any prepended slashes
+		while(argv[i].charAt(0)=='-')
+			argv[i]=argv[i].slice(1);
+
+		// Standard rspamc options:
+		if (argv[i]=='d' || argv[i]=='dest')
+			address = argv[++i];
+		else if (argv[i]=='f' || argv[i]=='filescan')
+			use_file_scan = true;
+		else if (argv[i]=='p' || argv[i]=='port')
+			tcp_port = Number(argv[++i]);
+	}
+
+	rspamd_scan(address, tcp_port, use_file_scan);
 }
 
 main();
