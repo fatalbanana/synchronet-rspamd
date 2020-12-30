@@ -12,9 +12,9 @@
 // ---------------------------------------------------------------------------
 
 // Options:
-// dest <rspamd_ip_address>
-// port <rspamd_tcp_port>
-// filescan
+// (d) dest <rspamd_ip_address>
+// (p) port <rspamd_tcp_port>
+// (f) filescan
 
 require("http.js", 'HTTPRequest');
 
@@ -22,9 +22,8 @@ function smtp_error(smtp_message)
 {
 	var error_file = new File(processing_error_filename);
 	if (!error_file.open("w")) {
-		log(LOG_ERR,format("!ERROR %d opening processing error file: %s"
-			,error_file.error, processing_error_filename));
-		return;
+		throw format("Unable to write processing error file (%s): %d",
+			processing_error_filename, error_file.error);
 	}
 	error_file.writeln(smtp_message);
 	error_file.close();
@@ -33,11 +32,10 @@ function smtp_error(smtp_message)
 function handle_result(result)
 {
 	if (result.error) {
-		log(LOG_ERR, "error from rspamd: " + result.error);
-		return;
+		throw "error from rspamd: " + result.error;
 	}
 
-	if (result.action == "no action") {
+	if (result.action == "no action" || result.action == "greylist") {
 		log(LOG_INFO, "message declared to be clean");
 	} else if (result.action == "reject") {
 		log(LOG_INFO, "rejecting SPAM with SMTP error");
@@ -58,7 +56,36 @@ function handle_result(result)
 			,recipient_address
 			,reverse_path);
 	} else if (result.action == "add header") {
-		// Rewrite message with added header
+		log(LOG_INFO, "adding SPAM flag to message");
+		// Open input file
+		var message_file = new File(message_text_filename);
+		if (!message_file.open("rb")) {
+			throw format("Unable to open message text file for reading (%s): %d",
+				message_text_filename, message_file.error);
+		}
+		// Open output file
+		var new_message_file = new File(new_message_text_filename);
+		if (!new_message_file.open("w")) {
+			throw format("Unable to open new message text file for writing (%s): %d",
+				message_text_filename, message_file.error);
+		}
+		// Copy file until we find end of headers
+		while ((ln = message_file.readln(2048)) != null) {
+			if (ln == '') {
+				// Write additional header
+				new_message_file.writeln("X-Spam-Flag: Yes");
+				new_message_file.writeln(ln);
+				break;
+			} else {
+				new_message_file.writeln(ln);
+			}
+		}
+		// Copy the rest of the message
+		while ((ln = message_file.readln(2048)) != null) {
+			new_message_file.writeln(ln);
+		}
+		new_message_file.close();
+		message_file.close()
 	} else {
 		log(LOG_WARNING, format("unimplemented action: %s", result.action));
 	}
@@ -97,7 +124,7 @@ function rspamd_scan(address, tcp_port, use_file_scan)
 			hdrs["Rcpt"] = addr_list.join(",");
 		}
 	} else {
-		log(LOG_ERROR, format("!ERROR %d opening recipients file: %s",
+		log(LOG_ERR, format("!ERROR %d opening recipients file: %s",
 			ini.error, recipients_list_filename));
 	}
 
@@ -113,20 +140,19 @@ function rspamd_scan(address, tcp_port, use_file_scan)
 	} else {
 		var message_file = new File(message_text_filename);
 		if (!message_file.open("rb")) {
-			log(LOG_ERROR, format("!ERROR %d opening message file: %s",
-				message_file.error, message_text_filename));
-			return;
+			throw format("Unable to open message text file for reading (%s): %d",
+				message_text_filename, message_file.error);
 		}
 		raw_result = http_request.Post(rspamd_url, message_file.read(),
 			undefined, undefined, "application/octet-stream");
+		message_file.close();
 	}
 
 	if (http_request.response_code !== 200) {
-		log(LOG_ERROR, format("!ERROR bad response code from rspamd: %d",
+		log(LOG_ERR, format("!ERROR bad response code from rspamd: %d",
 			http_request.response_code));
 	}
 
-	// XXX: try catch?
 	var presult = JSON.parse(raw_result);
 
 	return presult
@@ -154,10 +180,15 @@ function main()
 			tcp_port = Number(argv[++i]);
 	}
 
-	// Call Rspamd
-	var result = rspamd_scan(address, tcp_port, use_file_scan);
-	// Do something with scan results
-	handle_result(result);
+	try {
+		// Call Rspamd
+		var result = rspamd_scan(address, tcp_port, use_file_scan);
+		// Do something with scan results
+		handle_result(result);
+	} catch (e) {
+		// Something went wrong, log error
+		log(LOG_ERR, format("!ERROR %s", e));
+	}
 }
 
 main();
